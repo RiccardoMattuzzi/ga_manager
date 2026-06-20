@@ -1,0 +1,1 @@
+cd ~/Documents/"App candele" && python app.py
