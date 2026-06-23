@@ -6,8 +6,7 @@ import sqlite3
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QComboBox, QStyledItemDelegate,
-                             QLineEdit, QPushButton, QFileDialog, QMessageBox, QListWidget,
-                             QListWidgetItem, QLabel, QSpinBox, QDoubleSpinBox)
+                             QLineEdit, QPushButton, QFileDialog, QMessageBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QBrush
 from openpyxl import Workbook, load_workbook
@@ -48,9 +47,6 @@ FATTORI_CONVERSIONE = {
 PROJECT_DIR = Path(__file__).parent.absolute()
 DATA_DIR = PROJECT_DIR / "data"
 DB_PATH = DATA_DIR / "materie_prime.db"
-EXPORT_DIR = PROJECT_DIR / "exports"
-
-MAX_PROFONDITA_RICORSIONE = 5
 
 # ============================================================================
 # FUNZIONI E CLASSI
@@ -198,29 +194,12 @@ def save_composizione(prodotto_id, composizione_data):
     conn.commit()
     conn.close()
 
-def aggiungi_elemento_composizione(prodotto_id):
-    """Aggiunge una riga vuota alla composizione"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO composizione (prodotto_id, elemento_id, elemento_tipo, quantita) VALUES (?, NULL, ?, ?)",
-             (prodotto_id, "materia_prima", 0))
-    conn.commit()
-    conn.close()
-
-def elimina_elemento_composizione(elemento_id):
-    """Elimina un elemento dalla composizione"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM composizione WHERE id = ?", (elemento_id,))
-    conn.commit()
-    conn.close()
-
 def calcola_costo_prodotto(prodotto_id, visited=None, profondita=0):
     """Calcola il costo totale di un prodotto ricorsivamente"""
     if visited is None:
         visited = set()
     
-    if profondita > MAX_PROFONDITA_RICORSIONE:
+    if profondita > 5:
         return 0.0
     
     if prodotto_id in visited:
@@ -246,21 +225,6 @@ def calcola_costo_prodotto(prodotto_id, visited=None, profondita=0):
             costo_totale += costo_sub * quantita
     
     return costo_totale
-
-def detecta_ciclo(prodotto_id, elemento_id, elemento_tipo):
-    """Verifica se aggiungere questo elemento creerebbe un ciclo"""
-    if elemento_tipo != "prodotto":
-        return False
-    
-    if elemento_id == prodotto_id:
-        return True
-    
-    composizione = load_composizione(elemento_id)
-    for comp_id, el_id, el_tipo, qta in composizione:
-        if el_tipo == "prodotto" and detecta_ciclo(prodotto_id, el_id, el_tipo):
-            return True
-    
-    return False
 
 def esporta_excel(table):
     """Esporta la tabella in un file Excel"""
@@ -360,8 +324,6 @@ class MainWindow(QMainWindow):
         
         init_db()
         
-        self.composizione_ids = {}  # Mappa row -> comp_id
-        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
@@ -394,67 +356,36 @@ class MainWindow(QMainWindow):
         tab2_layout = QHBoxLayout()
         tab2.setLayout(tab2_layout)
         
-        # Panel sinistro: lista prodotti
+        # Panel sinistro: tabella prodotti
         left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel("Prodotti:"))
         
-        self.lista_prodotti = QListWidget()
-        self.lista_prodotti.itemSelectionChanged.connect(self.on_prodotto_selezionato)
-        left_layout.addWidget(self.lista_prodotti)
+        self.table_prodotti = QTableWidget()
+        self.setup_tabella_prodotti()
+        left_layout.addWidget(self.table_prodotti)
         
-        btn_layout_sx = QHBoxLayout()
-        btn_add_prodotto = QPushButton("Aggiungi")
-        btn_add_prodotto.clicked.connect(self.aggiungi_prodotto)
-        btn_del_prodotto = QPushButton("Elimina")
-        btn_del_prodotto.clicked.connect(self.elimina_prodotto)
-        btn_layout_sx.addWidget(btn_add_prodotto)
-        btn_layout_sx.addWidget(btn_del_prodotto)
-        left_layout.addLayout(btn_layout_sx)
+        button_prodotti_layout = QVBoxLayout()
+        btn_add = QPushButton("Aggiungi Prodotto")
+        btn_add.clicked.connect(self.aggiungi_prodotto)
+        btn_del = QPushButton("Elimina Prodotto")
+        btn_del.clicked.connect(self.elimina_prodotto)
+        btn_dup = QPushButton("Duplica Prodotto")
+        btn_dup.clicked.connect(self.duplica_prodotto)
         
-        # Panel destro: dettagli prodotto
+        button_prodotti_layout.addWidget(btn_add)
+        button_prodotti_layout.addWidget(btn_del)
+        button_prodotti_layout.addWidget(btn_dup)
+        left_layout.addLayout(button_prodotti_layout)
+        
+        # Panel destro: vuoto per adesso
+        right_widget = QWidget()
         right_layout = QVBoxLayout()
-        
-        self.current_prodotto_id = None
-        
-        right_layout.addWidget(QLabel("Nome:"))
-        self.input_nome_prodotto = QLineEdit()
-        self.input_nome_prodotto.textChanged.connect(self.on_change_dettagli)
-        right_layout.addWidget(self.input_nome_prodotto)
-        
-        right_layout.addWidget(QLabel("Tipo:"))
-        self.combo_tipo_prodotto = QComboBox()
-        self.combo_tipo_prodotto.addItems(TIPI_PRODOTTO)
-        self.combo_tipo_prodotto.currentIndexChanged.connect(self.on_change_dettagli)
-        right_layout.addWidget(self.combo_tipo_prodotto)
-        
-        right_layout.addWidget(QLabel("Composizione:"))
-        self.table_composizione = QTableWidget()
-        self.setup_tabella_composizione()
-        right_layout.addWidget(self.table_composizione)
-        
-        btn_layout_dx = QHBoxLayout()
-        btn_add_elemento = QPushButton("Aggiungi materia/prodotto")
-        btn_add_elemento.clicked.connect(self.aggiungi_elemento_composizione)
-        btn_del_elemento = QPushButton("Elimina riga")
-        btn_del_elemento.clicked.connect(self.elimina_elemento_composizione)
-        btn_layout_dx.addWidget(btn_add_elemento)
-        btn_layout_dx.addWidget(btn_del_elemento)
-        right_layout.addLayout(btn_layout_dx)
-        
-        self.label_costo_totale = QLabel("Costo totale: 0.00 €")
-        right_layout.addWidget(self.label_costo_totale)
+        right_widget.setLayout(right_layout)
         
         left_widget = QWidget()
         left_widget.setLayout(left_layout)
-        left_widget.setMinimumWidth(250)
-        
-        right_widget = QWidget()
-        right_widget.setLayout(right_layout)
         
         tab2_layout.addWidget(left_widget, 1)
-        tab2_layout.addWidget(right_widget, 2)
-        
-        self.carica_lista_prodotti()
+        tab2_layout.addWidget(right_widget, 1)
         
         # Tab 3: vuoto
         tab3 = QWidget()
@@ -508,248 +439,75 @@ class MainWindow(QMainWindow):
         self.table_materie.cellChanged.connect(lambda: save_materie_prime(self.table_materie))
         self.table_materie.resizeColumnsToContents()
     
-    def setup_tabella_composizione(self):
-        """Configura la tabella di composizione"""
-        self.table_composizione.setColumnCount(4)
-        self.table_composizione.setHorizontalHeaderLabels(["Tipo", "Elemento", "Quantità", "Costo Unitario"])
-        self.table_composizione.setRowCount(0)
+    def setup_tabella_prodotti(self):
+        """Configura la tabella dei prodotti"""
+        self.table_prodotti.setColumnCount(2)
+        self.table_prodotti.setHorizontalHeaderLabels(["Prodotto", "Costo Unitario (€)"])
+        self.table_prodotti.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.carica_prodotti()
     
-    def carica_lista_prodotti(self):
-        """Carica la lista di prodotti nella UI"""
-        self.lista_prodotti.clear()
+    def carica_prodotti(self):
+        """Carica i prodotti nella tabella"""
         prodotti = load_prodotti()
+        self.table_prodotti.setRowCount(len(prodotti))
         
-        for prod_id, nome, tipo in prodotti:
+        for row, (prod_id, nome, tipo) in enumerate(prodotti):
             costo = calcola_costo_prodotto(prod_id)
-            item_text = f"{nome} ({tipo}) - {costo:.2f}€"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.UserRole, prod_id)
-            self.lista_prodotti.addItem(item)
-    
-    def on_prodotto_selezionato(self):
-        """Quando selezioni un prodotto, carica i dettagli"""
-        item = self.lista_prodotti.currentItem()
-        if not item:
-            return
-        
-        self.current_prodotto_id = item.data(Qt.UserRole)
-        prodotto = get_prodotto_by_id(self.current_prodotto_id)
-        
-        if prodotto:
-            id_p, nome, tipo = prodotto
-            self.input_nome_prodotto.blockSignals(True)
-            self.combo_tipo_prodotto.blockSignals(True)
             
-            self.input_nome_prodotto.setText(nome)
-            self.combo_tipo_prodotto.setCurrentText(tipo)
+            item_nome = QTableWidgetItem(f"{nome} ({tipo})")
+            item_nome.setData(Qt.UserRole, prod_id)
+            item_nome.setFlags(item_nome.flags() & ~Qt.ItemIsEditable)
+            self.table_prodotti.setItem(row, 0, item_nome)
             
-            self.input_nome_prodotto.blockSignals(False)
-            self.combo_tipo_prodotto.blockSignals(False)
-            
-            self.carica_composizione()
-            self.aggiorna_costo_totale()
-    
-    def carica_composizione(self):
-        """Carica la composizione del prodotto selezionato"""
-        if not self.current_prodotto_id:
-            return
+            item_costo = QTableWidgetItem(f"{costo:.2f}")
+            item_costo.setFlags(item_costo.flags() & ~Qt.ItemIsEditable)
+            self.table_prodotti.setItem(row, 1, item_costo)
         
-        self.table_composizione.blockSignals(True)
-        self.table_composizione.setRowCount(0)
-        self.composizione_ids = {}
-        composizione = load_composizione(self.current_prodotto_id)
-        
-        materie = {(m[0], "materia_prima"): m[1] for m in load_materie_prime()}
-        prodotti = {(p[0], "prodotto"): p[1] for p in load_prodotti()}
-        
-        for comp_id, elemento_id, elemento_tipo, quantita in composizione:
-            row = self.table_composizione.rowCount()
-            self.table_composizione.insertRow(row)
-            self.composizione_ids[row] = comp_id
-            
-            # Colonna 0: tipo
-            combo_tipo = QComboBox()
-            combo_tipo.addItems(["materia_prima", "prodotto"])
-            combo_tipo.setCurrentText(elemento_tipo)
-            combo_tipo.currentIndexChanged.connect(lambda t=row: self.on_change_composizione(t))
-            self.table_composizione.setCellWidget(row, 0, combo_tipo)
-            
-            # Colonna 1: elemento
-            combo_elemento = QComboBox()
-            self.popola_combo_elemento(combo_elemento, elemento_tipo)
-            combo_elemento.setProperty("last_tipo", elemento_tipo)
-            if elemento_id:
-                for i in range(combo_elemento.count()):
-                    if combo_elemento.itemData(i) == elemento_id:
-                        combo_elemento.setCurrentIndex(i)
-                        break
-            combo_elemento.currentIndexChanged.connect(lambda t=row: self.on_change_composizione(t))
-            self.table_composizione.setCellWidget(row, 1, combo_elemento)
-            
-            # Colonna 2: quantità
-            spin = QDoubleSpinBox()
-            spin.setValue(parse_float(quantita))
-            spin.setMinimum(0)
-            spin.setMaximum(10000)
-            spin.setSingleStep(0.1)
-            spin.valueChanged.connect(lambda t=row: self.on_change_composizione(t))
-            self.table_composizione.setCellWidget(row, 2, spin)
-            
-            # Colonna 3: costo unitario (read-only)
-            self.aggiorna_costo_unitario_riga(row, elemento_id, elemento_tipo)
-        
-        self.table_composizione.blockSignals(False)
-    
-    def popola_combo_elemento(self, combo, elemento_tipo):
-        """Popola un combobox con materie prime o prodotti"""
-        combo.clear()
-        combo.addItem("-- Seleziona --", None)
-        
-        if elemento_tipo == "materia_prima":
-            materie = load_materie_prime()
-            for mat_id, nome, costo, quantita, unita in materie:
-                combo.addItem(nome, mat_id)
-        else:
-            prodotti = load_prodotti()
-            for prod_id, nome, tipo in prodotti:
-                if prod_id != self.current_prodotto_id:  # Evita di aggiungere se stesso
-                    combo.addItem(f"{nome} ({tipo})", prod_id)
-    
-    def aggiorna_costo_unitario_riga(self, row, elemento_id, elemento_tipo):
-        """Aggiorna il costo unitario di una riga"""
-        costo_str = "0.00"
-        
-        if elemento_tipo == "materia_prima" and elemento_id:
-            materia = get_materia_prima_by_id(elemento_id)
-            if materia:
-                id_m, nome, costo, qta, unita = materia
-                costo_unitario = costo / qta if qta > 0 else 0
-                costo_str = f"{costo_unitario:.2f}"
-        
-        elif elemento_tipo == "prodotto" and elemento_id:
-            costo_prod = calcola_costo_prodotto(elemento_id)
-            costo_str = f"{costo_prod:.2f}"
-        
-        item = QTableWidgetItem(costo_str)
-        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-        item.setBackground(QBrush(QColor(200, 200, 200)))
-        self.table_composizione.setItem(row, 3, item)
-    
-    def on_change_composizione(self, row):
-        """Quando cambia la composizione, aggiorna il costo"""
-        # Verifica che i widget esistano
-        combo_tipo = self.table_composizione.cellWidget(row, 0)
-        combo_elemento = self.table_composizione.cellWidget(row, 1)
-        
-        if not combo_tipo or not combo_elemento:
-            return
-        
-        elemento_tipo = combo_tipo.currentText()
-        elemento_id = combo_elemento.currentData()
-        
-        # Se il tipo cambia, ripopola il combobox elemento
-        old_tipo = combo_elemento.property("last_tipo")
-        if old_tipo != elemento_tipo:
-            combo_elemento.blockSignals(True)
-            self.popola_combo_elemento(combo_elemento, elemento_tipo)
-            combo_elemento.blockSignals(False)
-            combo_elemento.setProperty("last_tipo", elemento_tipo)
-        
-        self.aggiorna_costo_unitario_riga(row, elemento_id, elemento_tipo)
-        self.aggiorna_costo_totale()
-        self.salva_composizione()
-    
-    def aggiorna_costo_totale(self):
-        """Aggiorna il costo totale del prodotto"""
-        if not self.current_prodotto_id:
-            self.label_costo_totale.setText("Costo totale: 0.00 €")
-            return
-        
-        costo = calcola_costo_prodotto(self.current_prodotto_id)
-        self.label_costo_totale.setText(f"Costo totale: {costo:.2f} €")
-    
-    def salva_composizione(self):
-        """Salva la composizione dal table"""
-        if not self.current_prodotto_id:
-            return
-        
-        composizione_data = []
-        for row in range(self.table_composizione.rowCount()):
-            combo_tipo = self.table_composizione.cellWidget(row, 0)
-            combo_elemento = self.table_composizione.cellWidget(row, 1)
-            spin_quantita = self.table_composizione.cellWidget(row, 2)
-            
-            elemento_tipo = combo_tipo.currentText()
-            elemento_id = combo_elemento.currentData()
-            quantita = spin_quantita.value()
-            
-            if elemento_id:
-                # Verifica ciclo
-                if detecta_ciclo(self.current_prodotto_id, elemento_id, elemento_tipo):
-                    QMessageBox.warning(None, "Errore", "Aggiungere questo elemento creerebbe un ciclo!")
-                    continue
-                
-                composizione_data.append((elemento_tipo, elemento_id, quantita))
-        
-        save_composizione(self.current_prodotto_id, composizione_data)
-    
-    def on_change_dettagli(self):
-        """Quando cambiano i dettagli del prodotto"""
-        if not self.current_prodotto_id:
-            return
-        
-        nome = self.input_nome_prodotto.text()
-        tipo = self.combo_tipo_prodotto.currentText()
-        
-        if nome:
-            save_prodotto(self.current_prodotto_id, nome, tipo)
-            self.carica_lista_prodotti()
-            self.aggiorna_costo_totale()
+        self.table_prodotti.resizeColumnsToContents()
     
     def aggiungi_prodotto(self):
         """Aggiunge un nuovo prodotto"""
-        prod_id = save_prodotto(None, "Nuovo Prodotto", TIPI_PRODOTTO[0])
-        self.carica_lista_prodotti()
-        
-        # Seleziona il nuovo prodotto
-        for i in range(self.lista_prodotti.count()):
-            if self.lista_prodotti.item(i).data(Qt.UserRole) == prod_id:
-                self.lista_prodotti.setCurrentRow(i)
-                break
+        save_prodotto(None, "Nuovo Prodotto", TIPI_PRODOTTO[0])
+        self.carica_prodotti()
     
     def elimina_prodotto(self):
         """Elimina il prodotto selezionato"""
-        item = self.lista_prodotti.currentItem()
-        if not item:
+        row = self.table_prodotti.currentRow()
+        if row < 0:
+            QMessageBox.warning(None, "Errore", "Seleziona un prodotto")
             return
+        
+        item = self.table_prodotti.item(row, 0)
+        prod_id = item.data(Qt.UserRole)
         
         if QMessageBox.question(None, "Conferma", "Eliminare questo prodotto?") == QMessageBox.Yes:
-            prod_id = item.data(Qt.UserRole)
             delete_prodotto(prod_id)
-            self.carica_lista_prodotti()
-            self.table_composizione.setRowCount(0)
-            self.current_prodotto_id = None
+            self.carica_prodotti()
     
-    def aggiungi_elemento_composizione(self):
-        """Aggiunge una riga alla composizione"""
-        if not self.current_prodotto_id:
-            return
-        
-        aggiungi_elemento_composizione(self.current_prodotto_id)
-        self.carica_composizione()
-    
-    def elimina_elemento_composizione(self):
-        """Elimina una riga dalla composizione"""
-        row = self.table_composizione.currentRow()
+    def duplica_prodotto(self):
+        """Duplica il prodotto selezionato"""
+        row = self.table_prodotti.currentRow()
         if row < 0:
+            QMessageBox.warning(None, "Errore", "Seleziona un prodotto")
             return
         
-        comp_id = self.composizione_ids.get(row)
+        item = self.table_prodotti.item(row, 0)
+        prod_id = item.data(Qt.UserRole)
         
-        if comp_id:
-            elimina_elemento_composizione(comp_id)
-            self.carica_composizione()
-            self.aggiorna_costo_totale()
+        prodotto = get_prodotto_by_id(prod_id)
+        if not prodotto:
+            return
+        
+        id_p, nome, tipo = prodotto
+        new_nome = f"{nome} (copia)"
+        new_id = save_prodotto(None, new_nome, tipo)
+        
+        # Copia la composizione
+        composizione = load_composizione(prod_id)
+        comp_data = [(el_tipo, el_id, qta) for _, el_id, el_tipo, qta in composizione]
+        save_composizione(new_id, comp_data)
+        
+        self.carica_prodotti()
 
 # ============================================================================
 # MAIN
