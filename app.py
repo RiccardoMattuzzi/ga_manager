@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QComboBox, QStyledItemDelegate,
-                             QLineEdit, QPushButton, QFileDialog, QMessageBox)
+                             QLineEdit, QPushButton, QFileDialog, QMessageBox, QLabel, QDoubleSpinBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QBrush
 from openpyxl import Workbook, load_workbook
@@ -83,7 +83,14 @@ def init_db():
                   elemento_id INTEGER,
                   elemento_tipo TEXT,
                   quantita REAL,
+                  unita TEXT,
                   FOREIGN KEY(prodotto_id) REFERENCES prodotti(id))''')
+    
+    # Aggiungi la colonna unita se non esiste
+    try:
+        c.execute("ALTER TABLE composizione ADD COLUMN unita TEXT")
+    except sqlite3.OperationalError:
+        pass  # Colonna esiste già
     
     conn.commit()
     conn.close()
@@ -174,7 +181,7 @@ def load_composizione(prodotto_id):
     """Carica la composizione di un prodotto"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, elemento_id, elemento_tipo, quantita FROM composizione WHERE prodotto_id = ? ORDER BY id",
+    c.execute("SELECT id, elemento_id, elemento_tipo, quantita, unita FROM composizione WHERE prodotto_id = ? ORDER BY id",
              (prodotto_id,))
     data = c.fetchall()
     conn.close()
@@ -186,11 +193,19 @@ def save_composizione(prodotto_id, composizione_data):
     c = conn.cursor()
     c.execute("DELETE FROM composizione WHERE prodotto_id = ?", (prodotto_id,))
     
-    for elemento_tipo, elemento_id, quantita in composizione_data:
+    for elemento_id, quantita, unita in composizione_data:
         if elemento_id:
-            c.execute("INSERT INTO composizione (prodotto_id, elemento_id, elemento_tipo, quantita) VALUES (?, ?, ?, ?)",
-                     (prodotto_id, elemento_id, elemento_tipo, quantita))
+            c.execute("INSERT INTO composizione (prodotto_id, elemento_id, elemento_tipo, quantita, unita) VALUES (?, ?, ?, ?, ?)",
+                     (prodotto_id, elemento_id, "materia_prima", quantita, unita))
     
+    conn.commit()
+    conn.close()
+
+def elimina_composizione_riga(composizione_id):
+    """Elimina una riga di composizione"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM composizione WHERE id = ?", (composizione_id,))
     conn.commit()
     conn.close()
 
@@ -210,15 +225,21 @@ def calcola_costo_prodotto(prodotto_id, visited=None, profondita=0):
     costo_totale = 0.0
     composizione = load_composizione(prodotto_id)
     
-    for comp_id, elemento_id, elemento_tipo, quantita in composizione:
+    for comp_id, elemento_id, elemento_tipo, quantita, unita in composizione:
         quantita = parse_float(quantita)
         
         if elemento_tipo == "materia_prima":
             materia = get_materia_prima_by_id(elemento_id)
             if materia:
-                id_m, nome, costo, qta, unita = materia
+                id_m, nome, costo, qta, mat_unita = materia
+                
+                # Converti la quantità all'unità base della materia prima
+                fattore_da = FATTORI_CONVERSIONE.get(unita, 1.0) if unita else FATTORI_CONVERSIONE.get(mat_unita, 1.0)
+                fattore_a = FATTORI_CONVERSIONE.get(mat_unita, 1.0)
+                quantita_base = quantita * fattore_a / fattore_da
+                
                 costo_unitario = costo / qta if qta > 0 else 0
-                costo_totale += costo_unitario * quantita
+                costo_totale += costo_unitario * quantita_base
         
         elif elemento_tipo == "prodotto":
             costo_sub = calcola_costo_prodotto(elemento_id, visited.copy(), profondita + 1)
@@ -324,6 +345,9 @@ class MainWindow(QMainWindow):
         
         init_db()
         
+        self.current_prodotto_id = None
+        self.composizione_ids = {}
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
@@ -343,10 +367,16 @@ class MainWindow(QMainWindow):
         tab1_layout.addWidget(self.table_materie)
         
         button_layout = QHBoxLayout()
+        btn_add_row = QPushButton("Aggiungi Riga")
+        btn_add_row.clicked.connect(self.aggiungi_riga_materie)
+        btn_dup_mat = QPushButton("Duplica Materia Prima")
+        btn_dup_mat.clicked.connect(self.duplica_materia_prima)
         button_export = QPushButton("Esporta in Excel")
         button_export.clicked.connect(lambda: esporta_excel(self.table_materie))
         button_import = QPushButton("Importa da Excel")
         button_import.clicked.connect(lambda: importa_excel(self.table_materie))
+        button_layout.addWidget(btn_add_row)
+        button_layout.addWidget(btn_dup_mat)
         button_layout.addWidget(button_export)
         button_layout.addWidget(button_import)
         tab1_layout.addLayout(button_layout)
@@ -376,13 +406,28 @@ class MainWindow(QMainWindow):
         button_prodotti_layout.addWidget(btn_dup)
         left_layout.addLayout(button_prodotti_layout)
         
-        # Panel destro: vuoto per adesso
-        right_widget = QWidget()
+        # Panel destro: composizione
         right_layout = QVBoxLayout()
-        right_widget.setLayout(right_layout)
+        right_layout.addWidget(QLabel("Composizione:"))
+        
+        self.table_composizione = QTableWidget()
+        self.setup_tabella_composizione()
+        right_layout.addWidget(self.table_composizione)
+        
+        btn_add_elem = QPushButton("Aggiungi Ingrediente")
+        btn_add_elem.clicked.connect(self.aggiungi_ingrediente)
+        btn_del_elem = QPushButton("Elimina Ingrediente")
+        btn_del_elem.clicked.connect(self.elimina_ingrediente)
+        
+        right_layout.addWidget(btn_add_elem)
+        right_layout.addWidget(btn_del_elem)
         
         left_widget = QWidget()
         left_widget.setLayout(left_layout)
+        left_widget.setMinimumWidth(300)
+        
+        right_widget = QWidget()
+        right_widget.setLayout(right_layout)
         
         tab2_layout.addWidget(left_widget, 1)
         tab2_layout.addWidget(right_widget, 1)
@@ -393,6 +438,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(tab1, NOME_TAB_1)
         tabs.addTab(tab2, NOME_TAB_2)
         tabs.addTab(tab3, NOME_TAB_3)
+        
+        # Connetti selezione prodotto
+        self.table_prodotti.itemSelectionChanged.connect(self.on_prodotto_selezionato)
     
     def setup_tabella_materie(self):
         """Configura la tabella delle materie prime"""
@@ -439,12 +487,59 @@ class MainWindow(QMainWindow):
         self.table_materie.cellChanged.connect(lambda: save_materie_prime(self.table_materie))
         self.table_materie.resizeColumnsToContents()
     
+    def aggiungi_riga_materie(self):
+        """Aggiunge una riga vuota alla tabella materie"""
+        row = self.table_materie.rowCount()
+        self.table_materie.insertRow(row)
+        
+        self.table_materie.setItem(row, 0, QTableWidgetItem(""))
+        self.table_materie.setItem(row, 1, QTableWidgetItem(""))
+        self.table_materie.setItem(row, 2, QTableWidgetItem(""))
+        
+        combo = QComboBox()
+        combo.addItems(UNITA_MISURA)
+        combo.currentIndexChanged.connect(lambda: save_materie_prime(self.table_materie))
+        self.table_materie.setCellWidget(row, 3, combo)
+    
+    def duplica_materia_prima(self):
+        """Duplica la materia prima selezionata"""
+        row = self.table_materie.currentRow()
+        if row < 0:
+            QMessageBox.warning(None, "Errore", "Seleziona una materia prima")
+            return
+        
+        nome = self.table_materie.item(row, 0).text()
+        costo = self.table_materie.item(row, 1).text()
+        quantita = self.table_materie.item(row, 2).text()
+        combo = self.table_materie.cellWidget(row, 3)
+        unita = combo.currentText()
+        
+        if not nome:
+            QMessageBox.warning(None, "Errore", "La riga non ha un nome")
+            return
+        
+        self.aggiungi_riga_materie()
+        new_row = self.table_materie.rowCount() - 1
+        
+        self.table_materie.setItem(new_row, 0, QTableWidgetItem(f"{nome} (copia)"))
+        self.table_materie.setItem(new_row, 1, QTableWidgetItem(costo))
+        self.table_materie.setItem(new_row, 2, QTableWidgetItem(quantita))
+        combo_new = self.table_materie.cellWidget(new_row, 3)
+        combo_new.setCurrentText(unita)
+        
+        save_materie_prime(self.table_materie)
+    
     def setup_tabella_prodotti(self):
         """Configura la tabella dei prodotti"""
         self.table_prodotti.setColumnCount(2)
         self.table_prodotti.setHorizontalHeaderLabels(["Prodotto", "Costo Unitario (€)"])
         self.table_prodotti.setEditTriggers(QTableWidget.NoEditTriggers)
         self.carica_prodotti()
+    
+    def setup_tabella_composizione(self):
+        """Configura la tabella di composizione"""
+        self.table_composizione.setColumnCount(4)
+        self.table_composizione.setHorizontalHeaderLabels(["Materia Prima", "Unità", "Quantità", "Costo Parziale"])
     
     def carica_prodotti(self):
         """Carica i prodotti nella tabella"""
@@ -465,6 +560,245 @@ class MainWindow(QMainWindow):
         
         self.table_prodotti.resizeColumnsToContents()
     
+    def on_prodotto_selezionato(self):
+        """Quando si seleziona un prodotto, carica la composizione"""
+        row = self.table_prodotti.currentRow()
+        if row < 0:
+            self.current_prodotto_id = None
+            self.table_composizione.setRowCount(0)
+            return
+        
+        item = self.table_prodotti.item(row, 0)
+        self.current_prodotto_id = item.data(Qt.UserRole)
+        self.carica_composizione()
+    
+    def carica_composizione(self):
+        """Carica la composizione del prodotto selezionato"""
+        if not self.current_prodotto_id:
+            return
+        
+        self.table_composizione.blockSignals(True)
+        self.table_composizione.setRowCount(0)
+        self.composizione_ids = {}
+        
+        composizione = load_composizione(self.current_prodotto_id)
+        materie = load_materie_prime()
+        
+        for comp_id, elemento_id, elemento_tipo, quantita, unita in composizione:
+            row = self.table_composizione.rowCount()
+            self.table_composizione.insertRow(row)
+            self.composizione_ids[row] = comp_id
+            
+            # Colonna 0: Materia Prima (combobox)
+            combo_materia = QComboBox()
+            combo_materia.addItem("-- Seleziona --", None)
+            for mat_id, nome, costo, qta, mat_unita in materie:
+                combo_materia.addItem(nome, mat_id)
+            
+            if elemento_id:
+                for i in range(combo_materia.count()):
+                    if combo_materia.itemData(i) == elemento_id:
+                        combo_materia.setCurrentIndex(i)
+                        break
+            
+            combo_materia.currentIndexChanged.connect(self.on_cambio_materia_prima)
+            self.table_composizione.setCellWidget(row, 0, combo_materia)
+            
+            # Colonna 1: Unità di Misura (combobox con unità compatibili)
+            combo_unita = QComboBox()
+            self.popola_unita_compatibili(combo_unita, elemento_id)
+            if unita:
+                combo_unita.blockSignals(True)
+                combo_unita.setCurrentText(unita)
+                combo_unita.blockSignals(False)
+            combo_unita.currentIndexChanged.connect(self.on_cambio_unita)
+            self.table_composizione.setCellWidget(row, 1, combo_unita)
+            
+            # Colonna 2: Quantità
+            spin_quantita = QDoubleSpinBox()
+            spin_quantita.setValue(parse_float(quantita))
+            spin_quantita.setMinimum(0)
+            spin_quantita.setMaximum(10000)
+            spin_quantita.setSingleStep(0.1)
+            spin_quantita.setObjectName(f"spin_{row}")
+            spin_quantita.valueChanged.connect(self.on_cambio_quantita)
+            self.table_composizione.setCellWidget(row, 2, spin_quantita)
+            
+            # Colonna 3: Costo Parziale (read-only)
+            self.aggiorna_costo_parziale(row, elemento_id, quantita, unita)
+        
+        self.table_composizione.blockSignals(False)
+    
+    def popola_unita_compatibili(self, combo_unita, materia_id):
+        """Popola il combobox unità con solo le unità compatibili della materia prima"""
+        combo_unita.clear()
+        combo_unita.addItem("-- Seleziona --", None)
+        
+        if materia_id:
+            materia = get_materia_prima_by_id(materia_id)
+            if materia:
+                id_m, nome, costo, qta, mat_unita = materia
+                
+                # Unità compatibili per tipo
+                if mat_unita in ["kg", "grammi"]:
+                    for u in ["kg", "grammi"]:
+                        combo_unita.addItem(u, u)
+                elif mat_unita in ["litri", "ml"]:
+                    for u in ["litri", "ml"]:
+                        combo_unita.addItem(u, u)
+                elif mat_unita in ["m", "cm"]:
+                    for u in ["m", "cm"]:
+                        combo_unita.addItem(u, u)
+                else:
+                    combo_unita.addItem(mat_unita, mat_unita)
+    
+    def on_cambio_materia_prima(self):
+        """Quando cambia la materia prima, aggiorna le unità disponibili"""
+        row = self.table_composizione.currentRow()
+        if row < 0:
+            return
+        
+        combo_materia = self.table_composizione.cellWidget(row, 0)
+        combo_unita = self.table_composizione.cellWidget(row, 1)
+        
+        if combo_materia and combo_unita:
+            materia_id = combo_materia.currentData()
+            self.popola_unita_compatibili(combo_unita, materia_id)
+            self.on_cambio_quantita()
+    
+    def on_cambio_unita(self):
+        """Quando cambia l'unità"""
+        self.on_cambio_quantita()
+    
+    def on_cambio_quantita(self):
+        """Quando cambia la quantità, aggiorna il costo"""
+        # Trova la riga che ha triggerato il segnale
+        for row in range(self.table_composizione.rowCount()):
+            combo_materia = self.table_composizione.cellWidget(row, 0)
+            combo_unita = self.table_composizione.cellWidget(row, 1)
+            spin_quantita = self.table_composizione.cellWidget(row, 2)
+            
+            if spin_quantita:
+                materia_id = combo_materia.currentData() if combo_materia else None
+                unita = combo_unita.currentText() if combo_unita else ""
+                quantita = spin_quantita.value()
+                
+                self.aggiorna_costo_parziale(row, materia_id, quantita, unita)
+        
+        self.salva_composizione()
+        self.aggiorna_costo_prodotto()
+    
+    def aggiorna_costo_parziale(self, row, materia_id, quantita, unita):
+        """Aggiorna il costo parziale di una riga"""
+        costo_parziale = 0.0
+        
+        if materia_id and unita:
+            materia = get_materia_prima_by_id(materia_id)
+            if materia:
+                id_m, nome, costo, qta, mat_unita = materia
+                
+                # Converti la quantità all'unità base della materia prima
+                fattore_da = FATTORI_CONVERSIONE.get(unita, 1.0)
+                fattore_a = FATTORI_CONVERSIONE.get(mat_unita, 1.0)
+                quantita_base = quantita * fattore_a / fattore_da
+                
+                costo_unitario = costo / qta if qta > 0 else 0
+                costo_parziale = costo_unitario * quantita_base
+        
+        item = QTableWidgetItem(f"{costo_parziale:.2f}")
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        item.setBackground(QBrush(QColor(200, 200, 200)))
+        self.table_composizione.setItem(row, 3, item)
+    
+    def salva_composizione(self):
+        """Salva la composizione nel database"""
+        if not self.current_prodotto_id:
+            return
+        
+        composizione_data = []
+        for row in range(self.table_composizione.rowCount()):
+            combo_materia = self.table_composizione.cellWidget(row, 0)
+            combo_unita = self.table_composizione.cellWidget(row, 1)
+            spin_quantita = self.table_composizione.cellWidget(row, 2)
+            
+            if combo_materia and spin_quantita:
+                materia_id = combo_materia.currentData()
+                unita = combo_unita.currentText() if combo_unita else ""
+                quantita = spin_quantita.value()
+                
+                if materia_id and unita != "-- Seleziona --":
+                    composizione_data.append((materia_id, quantita, unita))
+        
+        save_composizione(self.current_prodotto_id, composizione_data)
+    
+    def aggiorna_costo_prodotto(self):
+        """Aggiorna il costo del prodotto nella tabella sinistra"""
+        if not self.current_prodotto_id:
+            return
+        
+        costo = calcola_costo_prodotto(self.current_prodotto_id)
+        
+        for row in range(self.table_prodotti.rowCount()):
+            item = self.table_prodotti.item(row, 0)
+            if item.data(Qt.UserRole) == self.current_prodotto_id:
+                item_costo = self.table_prodotti.item(row, 1)
+                item_costo.setText(f"{costo:.2f}")
+                break
+    
+    def aggiungi_ingrediente(self):
+        """Aggiunge una riga alla composizione"""
+        if not self.current_prodotto_id:
+            QMessageBox.warning(None, "Errore", "Seleziona un prodotto")
+            return
+        
+        row = self.table_composizione.rowCount()
+        self.table_composizione.insertRow(row)
+        self.composizione_ids[row] = None
+        
+        # Colonna 0: Materia Prima
+        combo_materia = QComboBox()
+        combo_materia.addItem("-- Seleziona --", None)
+        for mat_id, nome, costo, qta, unita in load_materie_prime():
+            combo_materia.addItem(nome, mat_id)
+        
+        combo_materia.currentIndexChanged.connect(self.on_cambio_materia_prima)
+        self.table_composizione.setCellWidget(row, 0, combo_materia)
+        
+        # Colonna 1: Unità
+        combo_unita = QComboBox()
+        combo_unita.addItem("-- Seleziona --", None)
+        combo_unita.currentIndexChanged.connect(self.on_cambio_unita)
+        self.table_composizione.setCellWidget(row, 1, combo_unita)
+        
+        # Colonna 2: Quantità
+        spin_quantita = QDoubleSpinBox()
+        spin_quantita.setMinimum(0)
+        spin_quantita.setMaximum(10000)
+        spin_quantita.setSingleStep(0.1)
+        spin_quantita.valueChanged.connect(self.on_cambio_quantita)
+        self.table_composizione.setCellWidget(row, 2, spin_quantita)
+        
+        # Colonna 3: Costo Parziale
+        item = QTableWidgetItem("0.00")
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        item.setBackground(QBrush(QColor(200, 200, 200)))
+        self.table_composizione.setItem(row, 3, item)
+    
+    def elimina_ingrediente(self):
+        """Elimina un ingrediente dalla composizione"""
+        row = self.table_composizione.currentRow()
+        if row < 0:
+            QMessageBox.warning(None, "Errore", "Seleziona un ingrediente")
+            return
+        
+        comp_id = self.composizione_ids.get(row)
+        if comp_id:
+            elimina_composizione_riga(comp_id)
+        
+        self.table_composizione.removeRow(row)
+        self.salva_composizione()
+        self.aggiorna_costo_prodotto()
+    
     def aggiungi_prodotto(self):
         """Aggiunge un nuovo prodotto"""
         save_prodotto(None, "Nuovo Prodotto", TIPI_PRODOTTO[0])
@@ -483,6 +817,8 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(None, "Conferma", "Eliminare questo prodotto?") == QMessageBox.Yes:
             delete_prodotto(prod_id)
             self.carica_prodotti()
+            self.current_prodotto_id = None
+            self.table_composizione.setRowCount(0)
     
     def duplica_prodotto(self):
         """Duplica il prodotto selezionato"""
@@ -502,9 +838,8 @@ class MainWindow(QMainWindow):
         new_nome = f"{nome} (copia)"
         new_id = save_prodotto(None, new_nome, tipo)
         
-        # Copia la composizione
         composizione = load_composizione(prod_id)
-        comp_data = [(el_tipo, el_id, qta) for _, el_id, el_tipo, qta in composizione]
+        comp_data = [(el_id, qta, unita) for _, el_id, el_tipo, qta, unita in composizione]
         save_composizione(new_id, comp_data)
         
         self.carica_prodotti()
